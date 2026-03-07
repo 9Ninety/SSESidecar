@@ -7,10 +7,32 @@ import {
   expect,
   it,
 } from "bun:test";
+import { createServer } from "node:net";
 
-const PROXY_PORT = 18080;
 const PING_INTERVAL_MS = 300;
 const DUMMY_MSG_COUNT = 5;
+
+async function getFreePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Failed to allocate a port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
 
 async function waitForServer(
   url: string,
@@ -49,6 +71,7 @@ async function collectSSEStream(url: string): Promise<string> {
 describe("SSE proxy", () => {
   let dummyServer: ReturnType<typeof Bun.serve>;
   let proxyProc: ReturnType<typeof Bun.spawn>;
+  let proxyPort: number;
 
   beforeAll(() => {
     const encoder = new TextEncoder();
@@ -87,14 +110,15 @@ describe("SSE proxy", () => {
     proxyProc?.kill();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    proxyPort = await getFreePort();
     proxyProc = Bun.spawn({
       cmd: ["bun", "run", "src/server.ts"],
       cwd: import.meta.dir + "/..",
       env: {
         ...process.env,
         UPSTREAM_URL: `http://localhost:${dummyServer.port}`,
-        PORT: String(PROXY_PORT),
+        PORT: String(proxyPort),
         PING_INTERVAL: String(PING_INTERVAL_MS),
       },
       stdout: "inherit",
@@ -107,7 +131,7 @@ describe("SSE proxy", () => {
   });
 
   it("forwards SSE data and injects keep-alive pings", async () => {
-    const proxyUrl = `http://localhost:${PROXY_PORT}/`;
+    const proxyUrl = `http://localhost:${proxyPort}/`;
     await waitForServer(proxyUrl);
 
     const output = await collectSSEStream(proxyUrl);
@@ -122,7 +146,7 @@ describe("SSE proxy", () => {
   });
 
   it("passes through non-SSE responses untouched", async () => {
-    const proxyUrl = `http://localhost:${PROXY_PORT}/api`;
+    const proxyUrl = `http://localhost:${proxyPort}/api`;
     await waitForServer(proxyUrl);
 
     const res = await fetch(proxyUrl);
