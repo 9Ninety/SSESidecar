@@ -82,6 +82,8 @@ location /events {
 }
 ```
 
+If you put another proxy in front of the sidecar, make sure that hop uses HTTP/1.1 or newer. Nginx defaults to HTTP/1.0 for upstream proxying, which can make small streamed responses look randomly slow because the response body is no longer framed the way modern clients expect. Setting `proxy_http_version 1.1;` avoids that trap.
+
 ### CDN idle timeouts
 
 Most CDNs and load balancers have idle timeouts (CloudFlare: 100s, ALB: 60s). Set `PING_INTERVAL` below whatever your lowest timeout is:
