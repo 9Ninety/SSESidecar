@@ -71,10 +71,7 @@ const server = Bun.serve<WsData>({
     );
 
     if (!isSSE) {
-      return new Response(response.body, {
-        status: response.status,
-        headers: response.headers,
-      });
+      return response;
     }
 
     const sseHeaders = new Headers(response.headers);
