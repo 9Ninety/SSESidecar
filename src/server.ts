@@ -1,3 +1,5 @@
+import { Logger } from "./logger";
+
 const UPSTREAM_URL = process.env.UPSTREAM_URL;
 if (!UPSTREAM_URL) {
   console.error("UPSTREAM_URL environment variable is required");
@@ -11,7 +13,12 @@ const UPSTREAM_WS = UPSTREAM_URL.replace(/^http/, "ws");
 
 const PING_BYTES = new TextEncoder().encode(PING_PAYLOAD);
 
+const logger = new Logger();
+const generateRequestId = () =>
+  Buffer.from(crypto.getRandomValues(new Uint8Array(4))).toString("hex");
+
 interface WsData {
+  id: string;
   path: string;
   upstream: WebSocket | null;
 }
@@ -20,19 +27,24 @@ const server = Bun.serve<WsData>({
   port: PORT,
 
   async fetch(req, server) {
-    const start = Date.now();
+    const id = generateRequestId();
     const url = new URL(req.url);
     const path = `${url.pathname}${url.search}`;
 
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      const ok = server.upgrade(req, { data: { path, upstream: null } });
-      console.log(`WS  ${path} ${ok ? "upgraded" : "failed"}`);
+      logger.info(`[${id}] [WS] → ${path}`);
+      const ok = server.upgrade(req, { data: { id, path, upstream: null } });
+
       if (!ok) {
+        logger.error(`[${id}] [WS] upgrade failed`, undefined);
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
+
+      logger.info(`[${id}] [101] ← ${path}`);
       return undefined;
     }
 
+    logger.info(`[${id}] [${req.method}] → ${path}`);
     const upstreamUrl = `${UPSTREAM_URL}${path}`;
     const headers = new Headers(req.headers);
 
@@ -45,6 +57,7 @@ const server = Bun.serve<WsData>({
     // a forwarded request causes undici to reject it.
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
     const body = hasBody ? await req.arrayBuffer() : undefined;
+
     if (body) {
       headers.delete("transfer-encoding");
       headers.set("content-length", String(body.byteLength));
@@ -58,25 +71,22 @@ const server = Bun.serve<WsData>({
         body,
       });
     } catch (error) {
-      console.error(`ERR ${req.method} ${path} upstream unreachable:`, error);
+      logger.error(`[${id}] upstream unreachable`, error);
       return new Response("Bad Gateway", { status: 502 });
     }
 
-    const elapsed = Date.now() - start;
     const contentType = response.headers.get("content-type") ?? "";
     const isSSE = contentType.includes("text/event-stream");
 
-    console.log(
-      `${isSSE ? "SSE" : "   "} ${req.method} ${path} ${response.status} (${elapsed}ms)`,
-    );
+    logger.info(`[${id}] [${response.status}] ← ${path}`);
 
     if (!isSSE) {
       return response;
     }
 
     const sseHeaders = new Headers(response.headers);
-
     const upstreamBody = response.body;
+
     if (!upstreamBody) {
       return new Response(null, {
         status: response.status,
@@ -91,7 +101,9 @@ const server = Bun.serve<WsData>({
       if (closed) {
         return;
       }
+
       closed = true;
+
       if (heartbeat) {
         clearInterval(heartbeat);
         heartbeat = null;
@@ -104,26 +116,37 @@ const server = Bun.serve<WsData>({
           if (closed) {
             return;
           }
+
           try {
             controller.enqueue(PING_BYTES);
-          } catch {
+          } catch (err) {
+            logger.error(`[${id}] [SSE] Failed to send heartbeat`, err);
             cleanup();
           }
         }, PING_INTERVAL);
+
+        logger.info(`[${id}] [SSE] + ${path} Starting heartbeat injection`);
 
         const reader = upstreamBody.getReader();
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done || closed) {
+            if (done) {
+              logger.info(`[${id}] [SSE] X ${path} Connection finished`);
               break;
             }
+
+            if (closed) {
+              break;
+            }
+
             controller.enqueue(value);
           }
         } catch (error) {
-          if (!closed) {
-            console.error(`SSE ${path} read error:`, error);
-          }
+          logger.error(
+            `[${id}] [SSE] Upstream connection terminated unexpectedly`,
+            error,
+          );
         } finally {
           cleanup();
           try {
@@ -134,6 +157,7 @@ const server = Bun.serve<WsData>({
         }
       },
       cancel() {
+        logger.info(`[${id}] [SSE] X ${path} Client connection closed`);
         cleanup();
       },
     });
@@ -146,20 +170,38 @@ const server = Bun.serve<WsData>({
 
   websocket: {
     open(ws) {
-      const upstream = new WebSocket(`${UPSTREAM_WS}${ws.data.path}`);
+      const { id, path } = ws.data;
+      const upstream = new WebSocket(`${UPSTREAM_WS}${path}`);
+
+      upstream.onopen = () => {
+        logger.info(`[${id}] [WS] + ${path} Connected to upstream`);
+      };
       upstream.onmessage = (event) => ws.send(event.data);
-      upstream.onclose = (event) => ws.close(event.code, event.reason);
-      upstream.onerror = () => ws.close(1011, "Upstream WebSocket error");
+      upstream.onclose = (event) => {
+        logger.info(
+          `[${id}] [WS] X ${path} Upstream closed with code ${event.code}`,
+        );
+        ws.close(event.code, event.reason);
+      };
+      upstream.onerror = (err) => {
+        logger.error(`[${id}] [WS] upstream error`, err);
+        ws.close(1011, "Upstream WebSocket error");
+      };
+
       ws.data.upstream = upstream;
     },
     message(ws, message) {
       const upstream = ws.data.upstream;
+
       if (upstream && upstream.readyState === WebSocket.OPEN) {
         upstream.send(message);
       }
     },
     close(ws, code, reason) {
+      const { id, path } = ws.data;
+      logger.info(`[${id}] [WS] X ${path} Client closed with code ${code}`);
       const upstream = ws.data.upstream;
+
       if (upstream && upstream.readyState === WebSocket.OPEN) {
         upstream.close(code, reason);
       }
@@ -167,12 +209,12 @@ const server = Bun.serve<WsData>({
     },
   },
 
-  error(error) {
-    console.error("Unhandled error:", error);
+  error(err) {
+    logger.error("Unhandled error", err);
     return new Response("Internal Server Error", { status: 500 });
   },
 });
 
-console.log(
+logger.info(
   `SSE heartbeat proxy listening on :${server.port}, upstream ${UPSTREAM_URL}`,
 );
