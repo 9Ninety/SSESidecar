@@ -18,12 +18,12 @@ Connections are cleaned up in both directions when either the client disconnects
 
 ## Configuration
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `UPSTREAM_URL` | Backend URL, e.g. `http://localhost:3000` | Required |
-| `PORT` | Proxy listen port | `8080` |
-| `PING_INTERVAL` | Ms between heartbeats | `15000` |
-| `PING_PAYLOAD` | Heartbeat content | `: PING\n\n` |
+| Variable        | Description                               | Default      |
+| :-------------- | :---------------------------------------- | :----------- |
+| `UPSTREAM_URL`  | Backend URL, e.g. `http://localhost:3000` | Required     |
+| `PORT`          | Proxy listen port                         | `8080`       |
+| `PING_INTERVAL` | Ms between heartbeats                     | `15000`      |
+| `PING_PAYLOAD`  | Heartbeat content                         | `: PING\n\n` |
 
 ## Usage
 
@@ -100,3 +100,7 @@ bun test
 ```
 
 Spins up a dummy SSE backend and the proxy, then checks that data gets forwarded and pings are injected.
+
+## License
+
+GNU General Public License v2.0
